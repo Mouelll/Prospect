@@ -153,11 +153,12 @@ async function main() {
     const naf = (row.activitePrincipaleUniteLegale ?? '').replace('.', '')
     if (!TARGET_NAFS.has(naf)) { totalFiltered++; continue }
 
+    // Filtre : dénomination sociale obligatoire (exclut auto-entrepreneurs et données masquées)
+    const denomination = row.denominationUniteLegale?.trim()
+    if (!denomination || denomination.startsWith('[')) { totalSkipped++; continue }
+
     const emp = TRANCHE_EFFECTIFS[row.trancheEffectifsUniteLegale] ?? null
-    const name = row.denominationUniteLegale?.trim() ||
-                 row.nomUsageUniteLegale?.trim() ||
-                 row.nomUniteLegale?.trim() ||
-                 `SIREN ${row.siren}`
+    const name = denomination
 
     batch.push({
       name,
