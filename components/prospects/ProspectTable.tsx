@@ -3,7 +3,6 @@ import {
   useReactTable,
   getCoreRowModel,
   getSortedRowModel,
-  getPaginationRowModel,
   flexRender,
   createColumnHelper,
   SortingState,
@@ -12,7 +11,11 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { format } from 'date-fns'
 import { fr } from 'date-fns/locale'
-import { ArrowUpDown, ArrowUp, ArrowDown, Eye, Archive, ChevronLeft, ChevronRight } from 'lucide-react'
+import {
+  ArrowUpDown, ArrowUp, ArrowDown,
+  Eye, Archive, ChevronLeft, ChevronRight,
+  Users, MapPin, Globe
+} from 'lucide-react'
 import { Company } from '@/lib/types'
 import { StatusBadge } from './StatusBadge'
 import { ScoreStars } from './ScoreStars'
@@ -24,9 +27,16 @@ const col = createColumnHelper<Company>()
 interface ProspectTableProps {
   data: Company[]
   onRefresh: () => void
+  page: number
+  totalPages: number
+  total: number
+  pageSize: number
+  onPageChange: (p: number) => void
 }
 
-export function ProspectTable({ data, onRefresh }: ProspectTableProps) {
+export function ProspectTable({
+  data, onRefresh, page, totalPages, total, pageSize, onPageChange,
+}: ProspectTableProps) {
   const router = useRouter()
   const [sorting, setSorting] = useState<SortingState>([])
 
@@ -34,16 +44,52 @@ export function ProspectTable({ data, onRefresh }: ProspectTableProps) {
     col.accessor('name', {
       header: 'Nom',
       cell: (i) => (
-        <span className="font-medium text-[#f0f0ee]">{i.getValue()}</span>
+        <div className="min-w-0">
+          <span className="font-medium text-[#f0f0ee] truncate block">{i.getValue()}</span>
+          {i.row.original.sector && (
+            <span className="text-xs text-[#555550]">{i.row.original.sector}</span>
+          )}
+        </div>
       ),
     }),
-    col.accessor('sector', {
-      header: 'Secteur',
-      cell: (i) => <span className="text-[#888880]">{i.getValue() ?? '—'}</span>,
-    }),
     col.accessor('city', {
-      header: 'Ville',
-      cell: (i) => <span className="text-[#888880]">{i.getValue() ?? '—'}</span>,
+      header: 'Localisation',
+      cell: (i) => {
+        const city = i.getValue()
+        const region = i.row.original.region
+        if (!city && !region) return <span className="text-[#444440]">—</span>
+        return (
+          <div className="text-sm">
+            {city && <div className="flex items-center gap-1 text-[#888880]"><MapPin size={11} />{city}</div>}
+            {region && <div className="text-xs text-[#555550]">{region}</div>}
+          </div>
+        )
+      },
+    }),
+    col.accessor('employees_count', {
+      header: 'Effectifs',
+      cell: (i) => {
+        const v = i.getValue()
+        if (v == null) return <span className="text-[#444440]">—</span>
+        return (
+          <div className="flex items-center gap-1 text-sm text-[#888880]">
+            <Users size={11} />
+            {v.toLocaleString('fr-FR')}
+          </div>
+        )
+      },
+    }),
+    col.accessor('google_rating', {
+      header: 'Google',
+      cell: (i) => {
+        const v = i.getValue()
+        if (v == null) return <span className="text-[#444440]">—</span>
+        return (
+          <span className={`text-sm font-medium ${v >= 4.5 ? 'text-green-400' : v >= 4 ? 'text-[#c9a96e]' : 'text-[#888880]'}`}>
+            ★ {v}
+          </span>
+        )
+      },
     }),
     col.accessor('score', {
       header: 'Score',
@@ -57,11 +103,11 @@ export function ProspectTable({ data, onRefresh }: ProspectTableProps) {
       header: 'Relance',
       cell: (i) => {
         const v = i.getValue()
-        if (!v) return <span className="text-[#555550]">—</span>
+        if (!v) return <span className="text-[#444440]">—</span>
         const date = new Date(v)
         const past = date < new Date()
         return (
-          <span className={past ? 'text-amber-400' : 'text-[#888880]'}>
+          <span className={`text-sm ${past ? 'text-amber-400' : 'text-[#888880]'}`}>
             {format(date, 'd MMM yy', { locale: fr })}
           </span>
         )
@@ -72,6 +118,17 @@ export function ProspectTable({ data, onRefresh }: ProspectTableProps) {
       header: '',
       cell: (i) => (
         <div className="flex items-center gap-1 justify-end">
+          {i.row.original.website && (
+            <a
+              href={i.row.original.website.startsWith('http') ? i.row.original.website : `https://${i.row.original.website}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="p-1.5 text-[#555550] hover:text-[#f0f0ee] transition-colors"
+            >
+              <Globe size={14} />
+            </a>
+          )}
           <Button
             variant="ghost"
             size="sm"
@@ -87,10 +144,7 @@ export function ProspectTable({ data, onRefresh }: ProspectTableProps) {
             size="sm"
             onClick={async (e) => {
               e.stopPropagation()
-              await supabase
-                .from('companies')
-                .update({ status: 'archived' })
-                .eq('id', i.row.original.id)
+              await supabase.from('companies').update({ status: 'archived' }).eq('id', i.row.original.id)
               onRefresh()
             }}
           >
@@ -108,8 +162,7 @@ export function ProspectTable({ data, onRefresh }: ProspectTableProps) {
     onSortingChange: setSorting,
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
-    getPaginationRowModel: getPaginationRowModel(),
-    initialState: { pagination: { pageSize: 50 } },
+    manualPagination: true,
   })
 
   return (
@@ -122,7 +175,7 @@ export function ProspectTable({ data, onRefresh }: ProspectTableProps) {
                 {hg.headers.map((header) => (
                   <th
                     key={header.id}
-                    className="text-left px-4 py-3 text-[#555550] font-medium text-xs uppercase tracking-wider cursor-pointer select-none hover:text-[#888880] transition-colors"
+                    className="text-left px-4 py-3 text-[#555550] font-medium text-xs uppercase tracking-wider cursor-pointer select-none hover:text-[#888880] transition-colors whitespace-nowrap"
                     onClick={header.column.getToggleSortingHandler()}
                   >
                     <div className="flex items-center gap-1">
@@ -156,8 +209,8 @@ export function ProspectTable({ data, onRefresh }: ProspectTableProps) {
             ))}
             {table.getRowModel().rows.length === 0 && (
               <tr>
-                <td colSpan={7} className="px-4 py-12 text-center text-[#555550]">
-                  Aucun prospect trouvé
+                <td colSpan={8} className="px-4 py-16 text-center text-[#555550]">
+                  Aucune entreprise trouvée — ajustez les filtres
                 </td>
               </tr>
             )}
@@ -165,28 +218,30 @@ export function ProspectTable({ data, onRefresh }: ProspectTableProps) {
         </table>
       </div>
 
-      <div className="flex items-center justify-between mt-4 text-sm text-[#888880]">
-        <span>
-          {table.getFilteredRowModel().rows.length} prospect
-          {table.getFilteredRowModel().rows.length !== 1 ? 's' : ''}
+      {/* Pagination */}
+      <div className="flex items-center justify-between mt-4 text-sm">
+        <span className="text-[#555550]">
+          {total === 0 ? '0' : (page * pageSize + 1).toLocaleString('fr-FR')}
+          –{Math.min((page + 1) * pageSize, total).toLocaleString('fr-FR')} sur{' '}
+          <span className="text-[#f0f0ee] font-medium">{total.toLocaleString('fr-FR')}</span>
         </span>
         <div className="flex items-center gap-2">
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => table.previousPage()}
-            disabled={!table.getCanPreviousPage()}
+            onClick={() => onPageChange(Math.max(0, page - 1))}
+            disabled={page === 0}
           >
             <ChevronLeft size={16} />
           </Button>
-          <span className="text-xs">
-            Page {table.getState().pagination.pageIndex + 1} / {table.getPageCount() || 1}
+          <span className="text-[#888880] text-xs px-2">
+            {page + 1} / {totalPages || 1}
           </span>
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => table.nextPage()}
-            disabled={!table.getCanNextPage()}
+            onClick={() => onPageChange(Math.min(totalPages - 1, page + 1))}
+            disabled={page >= totalPages - 1}
           >
             <ChevronRight size={16} />
           </Button>
