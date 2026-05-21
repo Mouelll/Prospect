@@ -39,3 +39,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Fichiers Sirene (trop volumineux pour git)
+*.csv
+StockUniteLegale_utf8.csv
