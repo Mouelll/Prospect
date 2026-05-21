@@ -6,7 +6,7 @@ import { supabase } from '@/lib/supabase'
 import { calculateScore } from '@/lib/scoring'
 import { NAF_LABELS, NAF_SECTEUR } from '@/lib/naf-codes'
 import { Button } from '@/components/ui/Button'
-import { Upload, CheckCircle, AlertCircle } from 'lucide-react'
+import { Upload, CheckCircle, AlertCircle, FileText } from 'lucide-react'
 import Link from 'next/link'
 
 const TRANCHE_EFFECTIFS: Record<string, number> = {
@@ -30,6 +30,54 @@ const DEPARTEMENTS = Array.from({ length: 95 }, (_, i) => {
   return n < 10 ? `0${n}` : `${n}`
 }).filter(Boolean) as string[]
 
+// Détection automatique du type de fichier Sirene
+type SireneFileType = 'unite_legale' | 'etablissement' | 'unknown'
+
+function detectFileType(headers: string[]): SireneFileType {
+  if (headers.includes('siren') && headers.includes('denominationUniteLegale') && !headers.includes('siret')) {
+    return 'unite_legale'
+  }
+  if (headers.includes('siret') && headers.includes('activitePrincipaleEtablissement')) {
+    return 'etablissement'
+  }
+  return 'unknown'
+}
+
+// Mapping StockUniteLegale → Company
+function mapUniteLegale(r: Record<string, string>) {
+  const naf = r.activitePrincipaleUniteLegale?.replace('.', '') ?? ''
+  const name = r.denominationUniteLegale || r.nomUsageUniteLegale || r.nomUniteLegale || `SIREN ${r.siren}`
+  return {
+    name,
+    naf_code: naf || null,
+    sector: NAF_SECTEUR[naf] ?? null,
+    city: null,      // pas disponible dans StockUniteLegale
+    postal_code: null,
+    siret: null,     // pas de SIRET dans ce fichier
+    siren: r.siren || null,
+    employees_count: TRANCHE_EFFECTIFS[r.trancheEffectifsUniteLegale] ?? null,
+    status: 'to_contact' as const,
+    source: 'sirene_ul',
+  }
+}
+
+// Mapping StockEtablissement → Company
+function mapEtablissement(r: Record<string, string>) {
+  const naf = r.activitePrincipaleEtablissement?.replace('.', '') ?? ''
+  return {
+    name: r.denominationUniteLegale || r.enseigne1Etablissement || `SIRET ${r.siret}`,
+    naf_code: naf || null,
+    sector: NAF_SECTEUR[naf] ?? null,
+    city: r.libelleCommuneEtablissement || null,
+    postal_code: r.codePostalEtablissement || null,
+    siret: r.siret || null,
+    siren: r.siren || null,
+    employees_count: TRANCHE_EFFECTIFS[r.trancheEffectifsEtablissement] ?? null,
+    status: 'to_contact' as const,
+    source: 'sirene',
+  }
+}
+
 export default function ImportPage() {
   const fileRef = useRef<HTMLInputElement>(null)
   const [nafFilter, setNafFilter] = useState<string[]>(ALL_NAF)
@@ -38,7 +86,7 @@ export default function ImportPage() {
   const [progress, setProgress] = useState(0)
   const [running, setRunning] = useState(false)
   const [result, setResult] = useState<ImportResult | null>(null)
-  const [step, setStep] = useState<1 | 2 | 3>(1)
+  const [detectedType, setDetectedType] = useState<SireneFileType | null>(null)
 
   const toggleNaf = (code: string) =>
     setNafFilter((f) => (f.includes(code) ? f.filter((c) => c !== code) : [...f, code]))
@@ -52,57 +100,71 @@ export default function ImportPage() {
     setRunning(true)
     setResult(null)
     setProgress(0)
-    setStep(2)
+    setDetectedType(null)
 
     let imported = 0
     let skipped = 0
     let errors = 0
-    const CHUNK = 10000
+    const CHUNK = 5000
+    let fileType: SireneFileType = 'unknown'
+    let headersDetected = false
 
     const processChunk = async (rows: Record<string, string>[]) => {
       const toInsert = rows
         .filter((r) => {
-          const naf = r.activitePrincipaleEtablissement?.replace('.', '')
+          // Filtre statut actif
+          const statut = r.etatAdministratifUniteLegale || r.etatAdministratifEtablissement
+          if (activeOnly && statut !== 'A') return false
+
+          // Filtre NAF
+          const naf = (r.activitePrincipaleUniteLegale || r.activitePrincipaleEtablissement || '')
+            .replace('.', '')
           if (!nafFilter.includes(naf)) return false
-          if (activeOnly && r.etatAdministratifEtablissement !== 'A') return false
-          if (deptFilter.length > 0) {
+
+          // Filtre département (uniquement pour StockEtablissement)
+          if (fileType === 'etablissement' && deptFilter.length > 0) {
             const cp = r.codePostalEtablissement ?? ''
-            const dept = cp.slice(0, 2)
-            if (!deptFilter.includes(dept)) return false
+            if (!deptFilter.includes(cp.slice(0, 2))) return false
           }
+
           return true
         })
         .map((r) => {
-          const naf = r.activitePrincipaleEtablissement?.replace('.', '')
-          const partial = {
-            name: r.denominationUniteLegale || r.enseigne1Etablissement || `SIRET ${r.siret}`,
-            naf_code: naf || null,
-            sector: NAF_SECTEUR[naf] ?? null,
-            city: r.libelleCommuneEtablissement || null,
-            postal_code: r.codePostalEtablissement || null,
-            siret: r.siret || null,
-            siren: r.siren || null,
-            employees_count: TRANCHE_EFFECTIFS[r.trancheEffectifsEtablissement] ?? null,
-            status: 'to_contact' as const,
-            source: 'sirene',
-            score: null as number | null,
-          }
-          partial.score = calculateScore(partial)
-          return partial
+          const partial = fileType === 'unite_legale'
+            ? mapUniteLegale(r)
+            : mapEtablissement(r)
+          return { ...partial, score: calculateScore(partial) }
         })
 
       if (toInsert.length === 0) return
 
-      const { error, data } = await supabase
-        .from('companies')
-        .upsert(toInsert, { onConflict: 'siret', ignoreDuplicates: true })
-        .select('id')
-
-      if (error) {
-        errors += toInsert.length
+      if (fileType === 'etablissement') {
+        // Upsert sur SIRET
+        const { error, data } = await supabase
+          .from('companies')
+          .upsert(toInsert, { onConflict: 'siret', ignoreDuplicates: true })
+          .select('id')
+        if (error) { errors += toInsert.length }
+        else { imported += data?.length ?? 0; skipped += toInsert.length - (data?.length ?? 0) }
       } else {
-        imported += data?.length ?? 0
-        skipped += toInsert.length - (data?.length ?? 0)
+        // Pour StockUniteLegale : insert classique (pas de SIRET unique)
+        // On filtre les SIREN déjà existants d'abord
+        const sirens = toInsert.map(r => r.siren).filter(Boolean)
+        const { data: existing } = await supabase
+          .from('companies')
+          .select('siren')
+          .in('siren', sirens as string[])
+        const existingSirens = new Set((existing ?? []).map(r => r.siren))
+        const newRows = toInsert.filter(r => !existingSirens.has(r.siren))
+        if (newRows.length > 0) {
+          const { error, data } = await supabase
+            .from('companies')
+            .insert(newRows)
+            .select('id')
+          if (error) { errors += newRows.length }
+          else { imported += data?.length ?? 0 }
+        }
+        skipped += toInsert.length - newRows.length
       }
     }
 
@@ -114,11 +176,19 @@ export default function ImportPage() {
         header: true,
         skipEmptyLines: true,
         worker: false,
-        chunk: async (results: { data: Record<string, string>[] }, parser) => {
+        chunk: async (results: { data: Record<string, string>[], meta: { fields?: string[] } }, parser) => {
           parser.pause()
+
+          // Détection du type sur le premier chunk
+          if (!headersDetected && results.meta.fields) {
+            fileType = detectFileType(results.meta.fields)
+            setDetectedType(fileType)
+            headersDetected = true
+          }
+
           buffer.push(...results.data)
           total += results.data.length
-          setProgress(Math.min(total / 1000000 * 100, 95))
+          setProgress(Math.min((total / 1500000) * 100, 95))
 
           while (buffer.length >= CHUNK) {
             const chunk = buffer.splice(0, CHUNK)
@@ -136,7 +206,12 @@ export default function ImportPage() {
     setProgress(100)
     setResult({ imported, skipped, errors })
     setRunning(false)
-    setStep(3)
+  }
+
+  const FILE_TYPE_LABELS: Record<SireneFileType, string> = {
+    unite_legale: '📋 StockUniteLegale détecté — données entreprises (SIREN)',
+    etablissement: '🏢 StockEtablissement détecté — données établissements (SIRET)',
+    unknown: '⚠️ Format non reconnu',
   }
 
   return (
@@ -144,18 +219,34 @@ export default function ImportPage() {
       <div className="mb-6">
         <h1 className="text-xl font-semibold text-[#f0f0ee]">Import Sirene</h1>
         <p className="text-sm text-[#888880] mt-0.5">
-          Importez le fichier StockEtablissement_utf8.csv de la Base Sirene INSEE
+          Compatible avec <span className="text-[#c9a96e]">StockUniteLegale_utf8.csv</span> et <span className="text-[#c9a96e]">StockEtablissement_utf8.csv</span>
         </p>
       </div>
 
-      {/* Step 1: Filters */}
+      {/* Info fichiers */}
+      <div className="grid grid-cols-2 gap-3 mb-5">
+        <div className="bg-[#161616] border border-white/[0.07] rounded-xl p-3">
+          <div className="flex items-center gap-2 mb-1">
+            <FileText size={14} className="text-[#c9a96e]" />
+            <span className="text-xs font-semibold text-[#f0f0ee]">StockUniteLegale</span>
+          </div>
+          <p className="text-xs text-[#555550]">Données entreprises (SIREN). Pas d&apos;adresse, mais toutes les sociétés françaises.</p>
+        </div>
+        <div className="bg-[#161616] border border-white/[0.07] rounded-xl p-3">
+          <div className="flex items-center gap-2 mb-1">
+            <FileText size={14} className="text-[#c9a96e]" />
+            <span className="text-xs font-semibold text-[#f0f0ee]">StockEtablissement</span>
+          </div>
+          <p className="text-xs text-[#555550]">Données établissements (SIRET). Inclut ville et code postal.</p>
+        </div>
+      </div>
+
+      {/* Filtres */}
       <div className="bg-[#161616] border border-white/[0.07] rounded-xl p-5 mb-4">
-        <h2 className="text-sm font-semibold text-[#f0f0ee] mb-4">
-          1. Filtres d&apos;import
-        </h2>
+        <h2 className="text-sm font-semibold text-[#f0f0ee] mb-4">1. Filtres</h2>
 
         <div className="mb-4">
-          <label className="label">Codes NAF</label>
+          <label className="label">Codes NAF ciblés</label>
           <div className="flex flex-wrap gap-2 mt-1">
             {ALL_NAF.map((code) => (
               <button
@@ -172,23 +263,17 @@ export default function ImportPage() {
             ))}
           </div>
           <div className="flex gap-2 mt-2">
-            <button
-              onClick={() => setNafFilter(ALL_NAF)}
-              className="text-xs text-[#c9a96e] hover:underline"
-            >
+            <button onClick={() => setNafFilter(ALL_NAF)} className="text-xs text-[#c9a96e] hover:underline">
               Tout sélectionner
             </button>
-            <button
-              onClick={() => setNafFilter([])}
-              className="text-xs text-[#888880] hover:underline"
-            >
+            <button onClick={() => setNafFilter([])} className="text-xs text-[#888880] hover:underline">
               Tout désélectionner
             </button>
           </div>
         </div>
 
         <div className="mb-4">
-          <label className="label">Départements (vide = tous)</label>
+          <label className="label">Départements <span className="text-[#444440] normal-case">(StockEtablissement uniquement — vide = tous)</span></label>
           <div className="flex flex-wrap gap-1.5 mt-1 max-h-28 overflow-y-auto">
             {DEPARTEMENTS.map((d) => (
               <button
@@ -205,10 +290,7 @@ export default function ImportPage() {
             ))}
           </div>
           {deptFilter.length > 0 && (
-            <button
-              onClick={() => setDeptFilter([])}
-              className="text-xs text-[#888880] hover:underline mt-1"
-            >
+            <button onClick={() => setDeptFilter([])} className="text-xs text-[#888880] hover:underline mt-1">
               Effacer la sélection
             </button>
           )}
@@ -221,15 +303,19 @@ export default function ImportPage() {
             onChange={(e) => setActiveOnly(e.target.checked)}
             className="accent-[#c9a96e]"
           />
-          Établissements actifs uniquement
+          Entreprises/établissements actifs uniquement
         </label>
       </div>
 
-      {/* Step 2: Upload */}
+      {/* Upload */}
       <div className="bg-[#161616] border border-white/[0.07] rounded-xl p-5 mb-4">
-        <h2 className="text-sm font-semibold text-[#f0f0ee] mb-4">
-          2. Fichier CSV Sirene
-        </h2>
+        <h2 className="text-sm font-semibold text-[#f0f0ee] mb-4">2. Fichier CSV</h2>
+
+        {detectedType && (
+          <div className="mb-3 text-xs text-[#c9a96e] bg-[#c9a96e]/10 border border-[#c9a96e]/20 rounded-lg px-3 py-2">
+            {FILE_TYPE_LABELS[detectedType]}
+          </div>
+        )}
 
         {running ? (
           <div className="space-y-3">
@@ -252,7 +338,7 @@ export default function ImportPage() {
           >
             <Upload className="mx-auto mb-3 text-[#555550]" size={28} />
             <p className="text-sm text-[#888880]">Cliquez pour sélectionner le fichier</p>
-            <p className="text-xs text-[#444440] mt-1">StockEtablissement_utf8.csv</p>
+            <p className="text-xs text-[#444440] mt-1">StockUniteLegale_utf8.csv ou StockEtablissement_utf8.csv</p>
             <input
               ref={fileRef}
               type="file"
@@ -264,7 +350,7 @@ export default function ImportPage() {
         )}
       </div>
 
-      {/* Step 3: Result */}
+      {/* Résultat */}
       {result && (
         <div className="bg-[#161616] border border-white/[0.07] rounded-xl p-5">
           <h2 className="text-sm font-semibold text-[#f0f0ee] mb-4 flex items-center gap-2">
@@ -274,25 +360,25 @@ export default function ImportPage() {
           <div className="space-y-2 text-sm mb-4">
             <div className="flex justify-between">
               <span className="text-[#888880]">Importées</span>
-              <span className="text-green-400 font-medium">{result.imported}</span>
+              <span className="text-green-400 font-medium">{result.imported.toLocaleString('fr-FR')}</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-[#888880]">Ignorées (doublons)</span>
-              <span className="text-[#888880]">{result.skipped}</span>
+              <span className="text-[#888880]">Ignorées (déjà présentes)</span>
+              <span className="text-[#888880]">{result.skipped.toLocaleString('fr-FR')}</span>
             </div>
             {result.errors > 0 && (
               <div className="flex justify-between">
                 <span className="text-[#888880]">Erreurs</span>
                 <span className="text-red-400 flex items-center gap-1">
                   <AlertCircle size={12} />
-                  {result.errors}
+                  {result.errors.toLocaleString('fr-FR')}
                 </span>
               </div>
             )}
           </div>
           <Link href="/prospects">
             <Button variant="primary" className="w-full">
-              Voir les prospects
+              Voir les prospects →
             </Button>
           </Link>
         </div>
