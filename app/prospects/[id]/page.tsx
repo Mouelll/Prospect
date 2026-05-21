@@ -10,10 +10,11 @@ import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Select } from '@/components/ui/Select'
 import { Spinner } from '@/components/ui/Spinner'
-import { ChevronLeft, Plus, Trash2 } from 'lucide-react'
+import { ChevronLeft, Plus, Trash2, Sparkles, ExternalLink, Globe, MapPin } from 'lucide-react'
 import Link from 'next/link'
 import { format } from 'date-fns'
 import { fr } from 'date-fns/locale'
+import { enrichBySiren, pappersUrl, googleSearchUrl, googleMapsUrl } from '@/lib/enrichment'
 
 type Tab = 'infos' | 'contacts' | 'historique' | 'notes'
 
@@ -80,6 +81,8 @@ export default function CompanyDetailPage() {
   const [interactions, setInteractions] = useState<Interaction[]>([])
   const [tab, setTab] = useState<Tab>('infos')
   const [loading, setLoading] = useState(true)
+  const [enriching, setEnriching] = useState(false)
+  const [enrichMsg, setEnrichMsg] = useState<string | null>(null)
 
   const notesTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -100,6 +103,31 @@ export default function CompanyDetailPage() {
   const updateField = async (field: keyof Company, value: unknown) => {
     await supabase.from('companies').update({ [field]: value || null }).eq('id', id)
     setCompany((c) => c ? { ...c, [field]: value } : c)
+  }
+
+  const handleEnrich = async () => {
+    if (!company?.siren || enriching) return
+    setEnriching(true)
+    setEnrichMsg(null)
+    const data = await enrichBySiren(company.siren)
+    if (!data) {
+      setEnrichMsg('Aucun résultat trouvé pour ce SIREN.')
+      setEnriching(false)
+      return
+    }
+    const update: Partial<Company> = {}
+    if (!company.city && data.city) update.city = data.city
+    if (!company.postal_code && data.postal_code) update.postal_code = data.postal_code
+    if (!company.region && data.region) update.region = data.region
+    if (!company.siret && data.siret) update.siret = data.siret
+    if (Object.keys(update).length > 0) {
+      await supabase.from('companies').update(update).eq('id', id)
+      setCompany(c => c ? { ...c, ...update } : c)
+      setEnrichMsg(`✓ ${Object.keys(update).join(', ')} mis à jour`)
+    } else {
+      setEnrichMsg('Aucune nouvelle information à ajouter.')
+    }
+    setEnriching(false)
   }
 
   const handleNotesChange = (v: string) => {
@@ -194,34 +222,83 @@ export default function CompanyDetailPage() {
 
       {/* Tab: Infos */}
       {tab === 'infos' && (
-        <div className="bg-[#161616] border border-white/[0.07] rounded-xl p-6">
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-6">
-            <EditableField label="Code NAF" value={company.naf_code} onSave={(v) => updateField('naf_code', v)} />
-            <EditableField label="Secteur" value={company.sector} onSave={(v) => updateField('sector', v)} />
-            <EditableField label="SIRET" value={company.siret} onSave={(v) => updateField('siret', v)} />
-            <EditableField label="SIREN" value={company.siren} onSave={(v) => updateField('siren', v)} />
-            <EditableField label="Site web" value={company.website} onSave={(v) => updateField('website', v)} type="url" />
-            <EditableField label="Email" value={company.email} onSave={(v) => updateField('email', v)} type="email" />
-            <EditableField label="Téléphone" value={company.phone} onSave={(v) => updateField('phone', v)} type="tel" />
-            <EditableField label="Ville" value={company.city} onSave={(v) => updateField('city', v)} />
-            <EditableField label="Code postal" value={company.postal_code} onSave={(v) => updateField('postal_code', v)} />
-            <EditableField label="Région" value={company.region} onSave={(v) => updateField('region', v)} />
-            <EditableField label="Effectifs" value={company.employees_count} onSave={(v) => updateField('employees_count', v ? parseInt(v) : null)} type="number" />
-            <EditableField label="Instagram" value={company.instagram_handle} onSave={(v) => updateField('instagram_handle', v)} />
-            <EditableField label="Note Google" value={company.google_rating} onSave={(v) => updateField('google_rating', v ? parseFloat(v) : null)} type="number" />
-            <div>
-              <label className="label">A une vidéo</label>
-              <div className="py-2 px-3">
-                <input
-                  type="checkbox"
-                  checked={company.has_video ?? false}
-                  onChange={(e) => updateField('has_video', e.target.checked)}
-                  className="accent-[#c9a96e] w-4 h-4"
-                />
-              </div>
+        <div className="space-y-4">
+          {/* Barre d'actions rapides */}
+          <div className="bg-[#161616] border border-white/[0.07] rounded-xl px-5 py-3 flex flex-wrap items-center gap-3">
+            {/* Enrichissement auto */}
+            {company.siren && (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={handleEnrich}
+                disabled={enriching}
+              >
+                {enriching ? <Spinner className="text-current" /> : <Sparkles size={13} />}
+                {enriching ? 'Recherche…' : 'Enrichir depuis Sirene'}
+              </Button>
+            )}
+            {enrichMsg && (
+              <span className={`text-xs ${enrichMsg.startsWith('✓') ? 'text-green-400' : 'text-[#888880]'}`}>
+                {enrichMsg}
+              </span>
+            )}
+            <div className="ml-auto flex items-center gap-3">
+              {/* Liens externes */}
+              {company.siren && (
+                <a href={pappersUrl(company.siren)} target="_blank" rel="noopener noreferrer"
+                  className="flex items-center gap-1 text-xs text-[#c9a96e] hover:text-[#e0c080] transition-colors"
+                  title="Infos légales, dirigeants, site web">
+                  <ExternalLink size={12} /> Pappers
+                </a>
+              )}
+              <a href={googleSearchUrl(company.name, company.city)} target="_blank" rel="noopener noreferrer"
+                className="flex items-center gap-1 text-xs text-[#555550] hover:text-[#888880] transition-colors"
+                title="Chercher le site web sur Google">
+                <Globe size={12} /> Site web
+              </a>
+              <a href={googleMapsUrl(company.name, company.city)} target="_blank" rel="noopener noreferrer"
+                className="flex items-center gap-1 text-xs text-[#555550] hover:text-[#888880] transition-colors"
+                title="Localiser sur Google Maps">
+                <MapPin size={12} /> Maps
+              </a>
+              {company.website && (
+                <a href={company.website} target="_blank" rel="noopener noreferrer"
+                  className="flex items-center gap-1 text-xs text-[#c9a96e] hover:text-[#e0c080] transition-colors">
+                  <Globe size={12} /> Visiter le site
+                </a>
+              )}
             </div>
-            <EditableField label="Source" value={company.source} onSave={(v) => updateField('source', v)} />
-            <EditableField label="Prochaine relance" value={company.next_followup_date} onSave={(v) => updateField('next_followup_date', v)} type="date" />
+          </div>
+
+          <div className="bg-[#161616] border border-white/[0.07] rounded-xl p-6">
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-6">
+              <EditableField label="Code NAF" value={company.naf_code} onSave={(v) => updateField('naf_code', v)} />
+              <EditableField label="Secteur" value={company.sector} onSave={(v) => updateField('sector', v)} />
+              <EditableField label="SIRET" value={company.siret} onSave={(v) => updateField('siret', v)} />
+              <EditableField label="SIREN" value={company.siren} onSave={(v) => updateField('siren', v)} />
+              <EditableField label="Site web" value={company.website} onSave={(v) => updateField('website', v)} type="url" />
+              <EditableField label="Email" value={company.email} onSave={(v) => updateField('email', v)} type="email" />
+              <EditableField label="Téléphone" value={company.phone} onSave={(v) => updateField('phone', v)} type="tel" />
+              <EditableField label="Ville" value={company.city} onSave={(v) => updateField('city', v)} />
+              <EditableField label="Code postal" value={company.postal_code} onSave={(v) => updateField('postal_code', v)} />
+              <EditableField label="Région" value={company.region} onSave={(v) => updateField('region', v)} />
+              <EditableField label="Effectifs" value={company.employees_count} onSave={(v) => updateField('employees_count', v ? parseInt(v) : null)} type="number" />
+              <EditableField label="Instagram" value={company.instagram_handle} onSave={(v) => updateField('instagram_handle', v)} />
+              <EditableField label="Note Google" value={company.google_rating} onSave={(v) => updateField('google_rating', v ? parseFloat(v) : null)} type="number" />
+              <div>
+                <label className="label">A une vidéo</label>
+                <div className="py-2 px-3">
+                  <input
+                    type="checkbox"
+                    checked={company.has_video ?? false}
+                    onChange={(e) => updateField('has_video', e.target.checked)}
+                    className="accent-[#c9a96e] w-4 h-4"
+                  />
+                </div>
+              </div>
+              <EditableField label="Source" value={company.source} onSave={(v) => updateField('source', v)} />
+              <EditableField label="Prochaine relance" value={company.next_followup_date} onSave={(v) => updateField('next_followup_date', v)} type="date" />
+            </div>
           </div>
         </div>
       )}

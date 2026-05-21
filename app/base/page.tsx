@@ -6,17 +6,16 @@ import { Company } from '@/lib/types'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Select } from '@/components/ui/Select'
-import { StatusBadge } from '@/components/prospects/StatusBadge'
 import { ScoreStars } from '@/components/prospects/ScoreStars'
 import { Spinner } from '@/components/ui/Spinner'
 import { NAF_LABELS, ALL_SECTEURS } from '@/lib/naf-codes'
+import { enrichBySiren, pappersUrl, googleSearchUrl } from '@/lib/enrichment'
 import {
   UserPlus, Users, MapPin, ChevronLeft, ChevronRight,
-  SlidersHorizontal, ChevronDown, ChevronUp, X, CheckSquare, Square
+  SlidersHorizontal, ChevronDown, ChevronUp, X, CheckSquare, Square,
+  Sparkles, ExternalLink
 } from 'lucide-react'
 import Link from 'next/link'
-import { format } from 'date-fns'
-import { fr } from 'date-fns/locale'
 
 const PAGE_SIZE = 100
 
@@ -59,6 +58,7 @@ export default function BaseSirenePage() {
   const [importing, setImporting] = useState(false)
   const [importedCount, setImportedCount] = useState<number | null>(null)
   const [migrationNeeded, setMigrationNeeded] = useState(false)
+  const [enrichingId, setEnrichingId] = useState<string | null>(null)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingFilters = useRef<Filters>(EMPTY)
 
@@ -144,22 +144,63 @@ export default function BaseSirenePage() {
     setSelected(next)
   }
 
-  // Import vers Prospects
+  // Enrichissement individuel d'une société
+  const enrichOne = async (company: Company) => {
+    if (!company.siren || enrichingId) return
+    setEnrichingId(company.id)
+    try {
+      const data = await enrichBySiren(company.siren)
+      if (data) {
+        const update: Partial<Company> = {}
+        if (!company.city && data.city) update.city = data.city
+        if (!company.postal_code && data.postal_code) update.postal_code = data.postal_code
+        if (!company.region && data.region) update.region = data.region
+        if (!company.siret && data.siret) update.siret = data.siret
+        if (Object.keys(update).length > 0) {
+          await supabase.from('companies').update(update).eq('id', company.id)
+          load(filters, page)
+        }
+      }
+    } finally {
+      setEnrichingId(null)
+    }
+  }
+
+  // Import vers Prospects (avec enrichissement auto)
   const addToProspects = async (ids: string[]) => {
     if (ids.length === 0) return
     setImporting(true)
     setImportedCount(null)
 
-    // Par batch de 500
+    // Récupère les sociétés sélectionnées pour enrichissement
+    const toEnrich = companies.filter(c => ids.includes(c.id) && c.siren && !c.city)
+
+    // Par batch de 500 → promotion
     const BATCH = 500
     let done = 0
     for (let i = 0; i < ids.length; i += BATCH) {
       const batch = ids.slice(i, i + BATCH)
-      await supabase
-        .from('companies')
-        .update({ in_prospect_list: true })
-        .in('id', batch)
+      await supabase.from('companies').update({ in_prospect_list: true }).in('id', batch)
       done += batch.length
+    }
+
+    // Enrichissement en arrière-plan (sans bloquer l'UI)
+    if (toEnrich.length > 0) {
+      const ENRICH_CONCURRENCY = 5
+      for (let i = 0; i < toEnrich.length; i += ENRICH_CONCURRENCY) {
+        const chunk = toEnrich.slice(i, i + ENRICH_CONCURRENCY)
+        await Promise.all(chunk.map(async (c) => {
+          const data = await enrichBySiren(c.siren!)
+          if (data?.city) {
+            await supabase.from('companies').update({
+              city: data.city,
+              postal_code: data.postal_code,
+              region: data.region,
+              siret: data.siret ?? c.siret,
+            }).eq('id', c.id)
+          }
+        }))
+      }
     }
 
     setImportedCount(done)
@@ -352,8 +393,8 @@ export default function BaseSirenePage() {
                   <th className="text-left px-4 py-3 text-[#555550] font-medium text-xs uppercase tracking-wider">Localisation</th>
                   <th className="text-left px-4 py-3 text-[#555550] font-medium text-xs uppercase tracking-wider">Effectifs</th>
                   <th className="text-left px-4 py-3 text-[#555550] font-medium text-xs uppercase tracking-wider">Score</th>
-                  <th className="text-left px-4 py-3 text-[#555550] font-medium text-xs uppercase tracking-wider">Source</th>
-                  <th className="px-4 py-3 w-28"></th>
+                  <th className="text-left px-4 py-3 text-[#555550] font-medium text-xs uppercase tracking-wider">Liens</th>
+                  <th className="px-4 py-3 w-36"></th>
                 </tr>
               </thead>
               <tbody>
@@ -408,21 +449,58 @@ export default function BaseSirenePage() {
                     <td className="px-4 py-3">
                       <ScoreStars score={c.score} size={12} />
                     </td>
-                    <td className="px-4 py-3">
-                      <span className="text-xs text-[#555550] bg-white/5 px-2 py-0.5 rounded">
-                        {c.source === 'sirene_ul' ? 'Unité légale' : 'Établissement'}
-                      </span>
+                    <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                      <div className="flex items-center gap-2">
+                        {c.siren && (
+                          <>
+                            <a
+                              href={pappersUrl(c.siren)}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-xs text-[#c9a96e] hover:text-[#e0c080] flex items-center gap-0.5"
+                              title="Pappers.fr — infos légales + site web"
+                            >
+                              <ExternalLink size={11} />
+                              Pappers
+                            </a>
+                            <a
+                              href={googleSearchUrl(c.name, c.city)}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-xs text-[#555550] hover:text-[#888880] flex items-center gap-0.5"
+                              title="Chercher le site web sur Google"
+                            >
+                              <ExternalLink size={11} />
+                              Google
+                            </a>
+                          </>
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
-                      <Button
-                        size="sm"
-                        variant="primary"
-                        onClick={() => addToProspects([c.id])}
-                        disabled={importing}
-                      >
-                        <UserPlus size={13} />
-                        Ajouter
-                      </Button>
+                      <div className="flex items-center gap-1.5">
+                        {!c.city && c.siren && (
+                          <button
+                            onClick={() => enrichOne(c)}
+                            disabled={enrichingId === c.id}
+                            className="p-1.5 rounded text-[#555550] hover:text-[#c9a96e] hover:bg-white/5 transition-colors disabled:opacity-50"
+                            title="Enrichir : récupérer ville, région…"
+                          >
+                            {enrichingId === c.id
+                              ? <Spinner className="w-3 h-3" />
+                              : <Sparkles size={13} />}
+                          </button>
+                        )}
+                        <Button
+                          size="sm"
+                          variant="primary"
+                          onClick={() => addToProspects([c.id])}
+                          disabled={importing}
+                        >
+                          <UserPlus size={13} />
+                          Ajouter
+                        </Button>
+                      </div>
                     </td>
                   </tr>
                 ))}
