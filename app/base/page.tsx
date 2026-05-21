@@ -1,0 +1,426 @@
+'use client'
+export const dynamic = 'force-dynamic'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { supabase } from '@/lib/supabase'
+import { Company } from '@/lib/types'
+import { Button } from '@/components/ui/Button'
+import { Input } from '@/components/ui/Input'
+import { Select } from '@/components/ui/Select'
+import { StatusBadge } from '@/components/prospects/StatusBadge'
+import { ScoreStars } from '@/components/prospects/ScoreStars'
+import { Spinner } from '@/components/ui/Spinner'
+import { NAF_LABELS, ALL_SECTEURS } from '@/lib/naf-codes'
+import {
+  UserPlus, Users, MapPin, ChevronLeft, ChevronRight,
+  SlidersHorizontal, ChevronDown, ChevronUp, X, CheckSquare, Square
+} from 'lucide-react'
+import Link from 'next/link'
+import { format } from 'date-fns'
+import { fr } from 'date-fns/locale'
+
+const PAGE_SIZE = 100
+
+const EFFECTIFS_OPTIONS = [
+  { value: '', label: 'Tous les effectifs' },
+  { value: '1-9', label: '1 – 9 salariés' },
+  { value: '10-49', label: '10 – 49 salariés' },
+  { value: '50-199', label: '50 – 199 salariés' },
+  { value: '200-999', label: '200 – 999 salariés' },
+  { value: '1000-', label: '1 000+ salariés' },
+]
+
+interface Filters {
+  search: string
+  sector: string
+  naf: string
+  region: string
+  city: string
+  effectifs: string
+  source: string
+}
+
+const EMPTY: Filters = { search: '', sector: '', naf: '', region: '', city: '', effectifs: '', source: '' }
+
+const REGIONS = [
+  'Auvergne-Rhône-Alpes', 'Bourgogne-Franche-Comté', 'Bretagne', 'Centre-Val de Loire',
+  'Corse', 'Grand Est', 'Guadeloupe', 'Guyane', 'Hauts-de-France',
+  'Île-de-France', 'La Réunion', 'Martinique', 'Mayotte', 'Normandie',
+  'Nouvelle-Aquitaine', 'Occitanie', 'Pays de la Loire', "Provence-Alpes-Côte d'Azur",
+]
+
+export default function BaseSirenePage() {
+  const [companies, setCompanies] = useState<Company[]>([])
+  const [total, setTotal] = useState(0)
+  const [page, setPage] = useState(0)
+  const [loading, setLoading] = useState(true)
+  const [filters, setFilters] = useState<Filters>(EMPTY)
+  const [expanded, setExpanded] = useState(false)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [importing, setImporting] = useState(false)
+  const [importedCount, setImportedCount] = useState<number | null>(null)
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pendingFilters = useRef<Filters>(EMPTY)
+
+  const buildQuery = useCallback((f: Filters, p: number) => {
+    let q = supabase
+      .from('companies')
+      .select('*', { count: 'exact' })
+      .eq('in_prospect_list', false)
+      .in('source', ['sirene', 'sirene_ul'])
+
+    if (f.search.trim()) q = q.or(`name.ilike.%${f.search.trim()}%,city.ilike.%${f.search.trim()}%`)
+    if (f.sector) q = q.eq('sector', f.sector)
+    if (f.naf) q = q.eq('naf_code', f.naf)
+    if (f.region) q = q.eq('region', f.region)
+    if (f.city.trim()) q = q.ilike('city', `%${f.city.trim()}%`)
+    if (f.source) q = q.eq('source', f.source)
+    if (f.effectifs) {
+      const [min, max] = f.effectifs.split('-')
+      if (min) q = q.gte('employees_count', parseInt(min))
+      if (max) q = q.lte('employees_count', parseInt(max))
+    }
+
+    return q.order('name').range(p * PAGE_SIZE, (p + 1) * PAGE_SIZE - 1)
+  }, [])
+
+  const load = useCallback(async (f: Filters, p: number) => {
+    setLoading(true)
+    const { data, count } = await buildQuery(f, p)
+    setCompanies(data ?? [])
+    setTotal(count ?? 0)
+    setLoading(false)
+    setSelected(new Set())
+  }, [buildQuery])
+
+  useEffect(() => { load(filters, page) }, [filters, page, load])
+
+  const handleFilterChange = (key: keyof Filters, value: string) => {
+    const next = { ...pendingFilters.current, [key]: value }
+    pendingFilters.current = next
+    setPage(0)
+    if (key === 'search' || key === 'city') {
+      if (debounceRef.current) clearTimeout(debounceRef.current)
+      debounceRef.current = setTimeout(() => setFilters(pendingFilters.current), 350)
+    } else {
+      setFilters(next)
+    }
+  }
+
+  const reset = () => {
+    pendingFilters.current = EMPTY
+    setFilters(EMPTY)
+    setPage(0)
+  }
+
+  // Sélection
+  const toggleAll = () => {
+    if (selected.size === companies.length) {
+      setSelected(new Set())
+    } else {
+      setSelected(new Set(companies.map(c => c.id)))
+    }
+  }
+
+  const toggleOne = (id: string) => {
+    const next = new Set(selected)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    setSelected(next)
+  }
+
+  // Import vers Prospects
+  const addToProspects = async (ids: string[]) => {
+    if (ids.length === 0) return
+    setImporting(true)
+    setImportedCount(null)
+
+    // Par batch de 500
+    const BATCH = 500
+    let done = 0
+    for (let i = 0; i < ids.length; i += BATCH) {
+      const batch = ids.slice(i, i + BATCH)
+      await supabase
+        .from('companies')
+        .update({ in_prospect_list: true })
+        .in('id', batch)
+      done += batch.length
+    }
+
+    setImportedCount(done)
+    setImporting(false)
+    load(filters, page)
+  }
+
+  const totalPages = Math.ceil(total / PAGE_SIZE)
+  const activeFilters = Object.values(filters).filter(v => v !== '').length
+  const allSelected = companies.length > 0 && selected.size === companies.length
+
+  return (
+    <div className="p-6">
+      {/* Header */}
+      <div className="flex items-center justify-between mb-5">
+        <div>
+          <h1 className="text-xl font-semibold text-[#f0f0ee]">Base Sirene</h1>
+          <p className="text-sm text-[#888880] mt-0.5">
+            {total.toLocaleString('fr-FR')} entreprise{total !== 1 ? 's' : ''} disponibles
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {selected.size > 0 && (
+            <Button
+              variant="primary"
+              onClick={() => addToProspects([...selected])}
+              disabled={importing}
+            >
+              {importing ? <Spinner className="text-[#0f0f0f]" /> : <UserPlus size={15} />}
+              Ajouter {selected.size.toLocaleString('fr-FR')} à mes prospects
+            </Button>
+          )}
+          <Link href="/import">
+            <Button variant="secondary">+ Importer un CSV</Button>
+          </Link>
+        </div>
+      </div>
+
+      {/* Feedback import */}
+      {importedCount !== null && (
+        <div className="mb-4 bg-green-900/20 border border-green-800/50 text-green-400 text-sm rounded-lg px-4 py-3 flex items-center justify-between">
+          <span>✓ {importedCount.toLocaleString('fr-FR')} entreprise{importedCount !== 1 ? 's' : ''} ajoutée{importedCount !== 1 ? 's' : ''} à vos prospects</span>
+          <Link href="/prospects" className="underline hover:text-green-300">Voir les prospects →</Link>
+        </div>
+      )}
+
+      {/* Filtres */}
+      <div className="mb-4 space-y-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <Input
+            placeholder="Rechercher par nom, ville…"
+            defaultValue={filters.search}
+            onChange={(e) => handleFilterChange('search', e.target.value)}
+            className="w-52"
+          />
+          <Select value={filters.sector} onChange={(e) => handleFilterChange('sector', e.target.value)} className="w-44">
+            <option value="">Tous secteurs</option>
+            {ALL_SECTEURS.map(s => <option key={s} value={s}>{s}</option>)}
+          </Select>
+          <Select value={filters.source} onChange={(e) => handleFilterChange('source', e.target.value)} className="w-44">
+            <option value="">Toutes sources</option>
+            <option value="sirene">Sirene Établissement</option>
+            <option value="sirene_ul">Sirene Unité légale</option>
+          </Select>
+          <Button
+            variant={expanded ? 'primary' : 'secondary'}
+            size="sm"
+            onClick={() => setExpanded(!expanded)}
+          >
+            <SlidersHorizontal size={13} />
+            Avancé
+            {activeFilters > 0 && (
+              <span className="bg-white/20 text-xs px-1.5 py-0.5 rounded-full">{activeFilters}</span>
+            )}
+            {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+          </Button>
+          {activeFilters > 0 && (
+            <Button variant="ghost" size="sm" onClick={reset}><X size={13} />Reset</Button>
+          )}
+          <span className="ml-auto text-sm text-[#555550]">
+            {total.toLocaleString('fr-FR')} résultat{total !== 1 ? 's' : ''}
+          </span>
+        </div>
+
+        {expanded && (
+          <div className="bg-[#161616] border border-white/[0.07] rounded-xl p-4 grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div>
+              <label className="label">Région</label>
+              <Select value={filters.region} onChange={(e) => handleFilterChange('region', e.target.value)}>
+                <option value="">Toutes régions</option>
+                {REGIONS.map(r => <option key={r} value={r}>{r}</option>)}
+              </Select>
+            </div>
+            <div>
+              <label className="label">Ville</label>
+              <Input placeholder="Ex: Lyon" defaultValue={filters.city} onChange={(e) => handleFilterChange('city', e.target.value)} />
+            </div>
+            <div>
+              <label className="label">Effectifs</label>
+              <Select value={filters.effectifs} onChange={(e) => handleFilterChange('effectifs', e.target.value)}>
+                {EFFECTIFS_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </Select>
+            </div>
+            <div>
+              <label className="label">Code NAF</label>
+              <Select value={filters.naf} onChange={(e) => handleFilterChange('naf', e.target.value)}>
+                <option value="">Tous les NAF</option>
+                {Object.entries(NAF_LABELS).map(([code, label]) => (
+                  <option key={code} value={code}>{code} — {label}</option>
+                ))}
+              </Select>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Action barre de sélection */}
+      {companies.length > 0 && (
+        <div className="flex items-center gap-3 mb-3 text-sm">
+          <button
+            onClick={toggleAll}
+            className="flex items-center gap-2 text-[#888880] hover:text-[#f0f0ee] transition-colors"
+          >
+            {allSelected
+              ? <CheckSquare size={16} className="text-[#c9a96e]" />
+              : <Square size={16} />}
+            {allSelected ? 'Tout désélectionner' : `Tout sélectionner (${companies.length})`}
+          </button>
+          {selected.size > 0 && (
+            <>
+              <span className="text-[#333330]">|</span>
+              <span className="text-[#c9a96e]">{selected.size} sélectionnée{selected.size > 1 ? 's' : ''}</span>
+              <Button
+                size="sm"
+                variant="primary"
+                onClick={() => addToProspects([...selected])}
+                disabled={importing}
+              >
+                {importing ? <Spinner className="text-[#0f0f0f]" /> : <UserPlus size={13} />}
+                Ajouter aux prospects
+              </Button>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Table */}
+      {loading ? (
+        <div className="flex items-center justify-center py-20">
+          <Spinner className="text-[#c9a96e] w-6 h-6 border-2" />
+        </div>
+      ) : (
+        <>
+          <div className="overflow-x-auto rounded-lg border border-white/[0.07]">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-white/[0.07]">
+                  <th className="px-3 py-3 w-10">
+                    <button onClick={toggleAll}>
+                      {allSelected
+                        ? <CheckSquare size={15} className="text-[#c9a96e]" />
+                        : <Square size={15} className="text-[#555550]" />}
+                    </button>
+                  </th>
+                  <th className="text-left px-4 py-3 text-[#555550] font-medium text-xs uppercase tracking-wider">Nom</th>
+                  <th className="text-left px-4 py-3 text-[#555550] font-medium text-xs uppercase tracking-wider">NAF</th>
+                  <th className="text-left px-4 py-3 text-[#555550] font-medium text-xs uppercase tracking-wider">Localisation</th>
+                  <th className="text-left px-4 py-3 text-[#555550] font-medium text-xs uppercase tracking-wider">Effectifs</th>
+                  <th className="text-left px-4 py-3 text-[#555550] font-medium text-xs uppercase tracking-wider">Score</th>
+                  <th className="text-left px-4 py-3 text-[#555550] font-medium text-xs uppercase tracking-wider">Source</th>
+                  <th className="px-4 py-3 w-28"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {companies.map((c) => (
+                  <tr
+                    key={c.id}
+                    className={`border-b border-white/[0.04] transition-colors cursor-pointer ${
+                      selected.has(c.id) ? 'bg-[#c9a96e]/5' : 'hover:bg-white/[0.02]'
+                    }`}
+                    onClick={() => toggleOne(c.id)}
+                  >
+                    <td className="px-3 py-3" onClick={(e) => e.stopPropagation()}>
+                      <button onClick={() => toggleOne(c.id)}>
+                        {selected.has(c.id)
+                          ? <CheckSquare size={15} className="text-[#c9a96e]" />
+                          : <Square size={15} className="text-[#555550]" />}
+                      </button>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="font-medium text-[#f0f0ee]">{c.name}</div>
+                      {c.sector && <div className="text-xs text-[#555550]">{c.sector}</div>}
+                    </td>
+                    <td className="px-4 py-3">
+                      {c.naf_code ? (
+                        <div>
+                          <div className="text-xs text-[#c9a96e] font-medium">{c.naf_code}</div>
+                          <div className="text-xs text-[#555550]">{NAF_LABELS[c.naf_code] ?? ''}</div>
+                        </div>
+                      ) : <span className="text-[#444440]">—</span>}
+                    </td>
+                    <td className="px-4 py-3">
+                      {c.city || c.region ? (
+                        <div>
+                          {c.city && (
+                            <div className="flex items-center gap-1 text-[#888880] text-xs">
+                              <MapPin size={10} />{c.city}
+                              {c.postal_code && <span className="text-[#555550]">({c.postal_code})</span>}
+                            </div>
+                          )}
+                          {c.region && <div className="text-xs text-[#555550]">{c.region}</div>}
+                        </div>
+                      ) : <span className="text-[#444440]">—</span>}
+                    </td>
+                    <td className="px-4 py-3">
+                      {c.employees_count != null ? (
+                        <div className="flex items-center gap-1 text-[#888880] text-xs">
+                          <Users size={11} />
+                          {c.employees_count.toLocaleString('fr-FR')}
+                        </div>
+                      ) : <span className="text-[#444440]">—</span>}
+                    </td>
+                    <td className="px-4 py-3">
+                      <ScoreStars score={c.score} size={12} />
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className="text-xs text-[#555550] bg-white/5 px-2 py-0.5 rounded">
+                        {c.source === 'sirene_ul' ? 'Unité légale' : 'Établissement'}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                      <Button
+                        size="sm"
+                        variant="primary"
+                        onClick={() => addToProspects([c.id])}
+                        disabled={importing}
+                      >
+                        <UserPlus size={13} />
+                        Ajouter
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+                {companies.length === 0 && (
+                  <tr>
+                    <td colSpan={8} className="px-4 py-16 text-center text-[#555550]">
+                      {total === 0
+                        ? 'Aucune entreprise dans la base — importez un fichier Sirene'
+                        : 'Aucun résultat pour ces filtres'}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Pagination */}
+          <div className="flex items-center justify-between mt-4 text-sm">
+            <span className="text-[#555550]">
+              {total === 0 ? '0' : (page * PAGE_SIZE + 1).toLocaleString('fr-FR')}–
+              {Math.min((page + 1) * PAGE_SIZE, total).toLocaleString('fr-FR')} sur{' '}
+              <span className="text-[#f0f0ee] font-medium">{total.toLocaleString('fr-FR')}</span>
+            </span>
+            <div className="flex items-center gap-2">
+              <Button variant="ghost" size="sm" onClick={() => setPage(p => Math.max(0, p - 1))} disabled={page === 0}>
+                <ChevronLeft size={16} />
+              </Button>
+              <span className="text-[#888880] text-xs px-2">
+                {page + 1} / {totalPages || 1}
+              </span>
+              <Button variant="ghost" size="sm" onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))} disabled={page >= totalPages - 1}>
+                <ChevronRight size={16} />
+              </Button>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}

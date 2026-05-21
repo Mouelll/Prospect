@@ -1,13 +1,14 @@
 'use client'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { Building2, KanbanSquare, Bell, Upload, FileText } from 'lucide-react'
+import { Building2, KanbanSquare, Bell, Upload, FileText, Database } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 const NAV = [
   { href: '/prospects', label: 'Prospects', icon: Building2 },
   { href: '/pipeline', label: 'Pipeline', icon: KanbanSquare },
   { href: '/relances', label: 'Relances', icon: Bell },
+  { href: '/base', label: 'Base Sirene', icon: Database },
   { href: '/import', label: 'Import', icon: Upload },
   { href: '/templates', label: 'Templates', icon: FileText },
 ]

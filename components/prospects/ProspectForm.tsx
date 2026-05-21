@@ -12,7 +12,7 @@ import { NAF_LABELS, NAF_SECTEUR } from '@/lib/naf-codes'
 import { Company } from '@/lib/types'
 import { Spinner } from '@/components/ui/Spinner'
 
-type FormData = Omit<Company, 'id' | 'created_at' | 'updated_at' | 'last_contact_at'>
+type FormData = Omit<Company, 'id' | 'created_at' | 'updated_at' | 'last_contact_at' | 'in_prospect_list'>
 
 const EMPTY: FormData = {
   name: '',
@@ -63,7 +63,7 @@ export function ProspectForm({ initial, companyId }: ProspectFormProps) {
     setError(null)
 
     const autoScore = calculateScore(form)
-    const payload = { ...form, score: form.score ?? autoScore }
+    const payload = { ...form, score: form.score ?? autoScore, in_prospect_list: true }
 
     let id = companyId
     if (companyId) {

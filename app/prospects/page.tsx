@@ -17,6 +17,7 @@ function buildQuery(filters: Filters, page: number) {
   let q = supabase
     .from('companies')
     .select('*', { count: 'exact' })
+    .eq('in_prospect_list', true)
 
   // Recherche texte
   if (filters.search.trim()) {
@@ -123,7 +124,7 @@ export default function ProspectsPage() {
   const handleExport = async () => {
     setExporting(true)
     // Export sans pagination — on récupère jusqu'à 5 000 lignes
-    let q = supabase.from('companies').select('*')
+    let q = supabase.from('companies').select('*').eq('in_prospect_list', true)
     if (filters.search.trim()) q = q.or(`name.ilike.%${filters.search.trim()}%,city.ilike.%${filters.search.trim()}%`)
     if (filters.status) q = q.eq('status', filters.status)
     if (filters.sector) q = q.eq('sector', filters.sector)

@@ -31,6 +31,7 @@ export interface Company {
   notes: string | null
   next_followup_date: string | null
   last_contact_at: string | null
+  in_prospect_list: boolean
   created_at: string
   updated_at: string
 }
