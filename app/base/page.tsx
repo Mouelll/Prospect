@@ -65,7 +65,7 @@ export default function BaseSirenePage() {
   const buildQuery = useCallback((f: Filters, p: number, hasMigration: boolean) => {
     let q = supabase
       .from('companies')
-      .select('*', { count: 'exact' })
+      .select('*', { count: 'estimated' })
       .in('source', ['sirene', 'sirene_ul'])
 
     // Filtre in_prospect_list uniquement si la colonne existe
@@ -83,7 +83,7 @@ export default function BaseSirenePage() {
       if (max) q = q.lte('employees_count', parseInt(max))
     }
 
-    return q.order('name').range(p * PAGE_SIZE, (p + 1) * PAGE_SIZE - 1)
+    return q.order('id').range(p * PAGE_SIZE, (p + 1) * PAGE_SIZE - 1)
   }, [])
 
   const load = useCallback(async (f: Filters, p: number) => {
