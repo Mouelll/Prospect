@@ -58,15 +58,18 @@ export default function BaseSirenePage() {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [importing, setImporting] = useState(false)
   const [importedCount, setImportedCount] = useState<number | null>(null)
+  const [migrationNeeded, setMigrationNeeded] = useState(false)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingFilters = useRef<Filters>(EMPTY)
 
-  const buildQuery = useCallback((f: Filters, p: number) => {
+  const buildQuery = useCallback((f: Filters, p: number, hasMigration: boolean) => {
     let q = supabase
       .from('companies')
       .select('*', { count: 'exact' })
-      .eq('in_prospect_list', false)
       .in('source', ['sirene', 'sirene_ul'])
+
+    // Filtre in_prospect_list uniquement si la colonne existe
+    if (hasMigration) q = q.eq('in_prospect_list', false)
 
     if (f.search.trim()) q = q.or(`name.ilike.%${f.search.trim()}%,city.ilike.%${f.search.trim()}%`)
     if (f.sector) q = q.eq('sector', f.sector)
@@ -85,9 +88,22 @@ export default function BaseSirenePage() {
 
   const load = useCallback(async (f: Filters, p: number) => {
     setLoading(true)
-    const { data, count } = await buildQuery(f, p)
-    setCompanies(data ?? [])
-    setTotal(count ?? 0)
+
+    // Tente d'abord avec la colonne in_prospect_list
+    const { data, count, error } = await buildQuery(f, p, true)
+
+    if (error && error.message?.includes('in_prospect_list')) {
+      // Colonne absente → migration non exécutée
+      setMigrationNeeded(true)
+      const fallback = await buildQuery(f, p, false)
+      setCompanies(fallback.data ?? [])
+      setTotal(fallback.count ?? 0)
+    } else {
+      setMigrationNeeded(false)
+      setCompanies(data ?? [])
+      setTotal(count ?? 0)
+    }
+
     setLoading(false)
     setSelected(new Set())
   }, [buildQuery])
@@ -181,6 +197,29 @@ export default function BaseSirenePage() {
           </Link>
         </div>
       </div>
+
+      {/* Bandeau migration manquante */}
+      {migrationNeeded && (
+        <div className="mb-4 bg-amber-900/20 border border-amber-700/50 text-amber-300 text-sm rounded-lg px-4 py-3">
+          <p className="font-medium mb-1">⚠️ Migration Supabase requise</p>
+          <p className="text-amber-400/80 mb-2">
+            La colonne <code className="bg-black/30 px-1 rounded">in_prospect_list</code> est manquante.
+            Les entreprises s&apos;affichent mais le bouton &quot;Ajouter aux prospects&quot; ne fonctionnera pas tant que la migration n&apos;est pas exécutée.
+          </p>
+          <p className="text-xs text-amber-400/60 font-mono bg-black/30 px-3 py-2 rounded">
+            ALTER TABLE companies ADD COLUMN IF NOT EXISTS in_prospect_list boolean NOT NULL DEFAULT false;<br />
+            CREATE INDEX IF NOT EXISTS idx_companies_prospect_list ON companies(in_prospect_list);
+          </p>
+          <a
+            href="https://supabase.com/dashboard/project/zdfaocljvgivthnmlhoc/sql/new"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-block mt-2 text-xs text-amber-300 underline hover:text-amber-200"
+          >
+            Ouvrir le SQL Editor Supabase →
+          </a>
+        </div>
+      )}
 
       {/* Feedback import */}
       {importedCount !== null && (
